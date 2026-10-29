@@ -23,7 +23,6 @@ public class ScannerBuilder {
     private static final String[] EXTENSION_JS_JSON = {"js", "json"};
     private static final String[] EXTENSION_CSS = {"css"};
     private static final String[] EXTENSION_JS_JSON_CSS_MAP = {"js", "json", "css", "map"};
-    private static final String[] PASSIVE_SCAN_EXTENSIONS = {"js", "json", "css"};
     private static final MontoyaApi api = BurpExtender.getApi();
 
     private final List<HttpRequestResponse> baseRequestResponseArray;
@@ -205,13 +204,20 @@ public class ScannerBuilder {
      *  AuditResult (see Utilities.beginIssueCollection) - the Dashboard integrated path.
      */
     public static void runPassiveScansSynchronously(HttpRequestResponse requestResponse) {
-        if (!BurpExtender.isLoaded() || !Utilities.isValidScanTarget(requestResponse, PASSIVE_SCAN_EXTENSIONS)) {
+        if (!BurpExtender.isLoaded() || !requestResponse.hasResponse()) {
             return;
         }
         String path = requestResponse.request().pathWithoutQuery();
         boolean isJs = path.endsWith(".js");
         boolean isJson = path.endsWith(".json");
         boolean isCss = path.endsWith(".css");
+        // HTML is detected by the response's Content-Type (not just the ".html" extension),
+        // so extensionless HTML pages are covered as well.
+        boolean isHtml = Utilities.isHTMLResponse(requestResponse);
+
+        if (!isJs && !isJson && !isCss && !isHtml) {
+            return;
+        }
 
         long ts = Instant.now().toEpochMilli();
 
@@ -220,6 +226,10 @@ public class ScannerBuilder {
             runInlineScan(requestResponse, TaskName.DEPENDENCY_CONFUSION_SCAN, ts);
             runInlineScan(requestResponse, TaskName.CLOUD_URLS_SCAN, ts);
             runInlineScan(requestResponse, TaskName.SUBDOMAINS_SCAN, ts);
+        }
+        if (isHtml) {
+            // HTML responses are scanned for secrets only, using the exact same logic as JS files
+            runInlineScan(requestResponse, TaskName.SECRETS_SCAN, ts);
         }
         if (isCss) {
             // CSS files are only checked for disclosed NPM package names (e.g. '/node_modules/<pkg>')
@@ -278,7 +288,13 @@ public class ScannerBuilder {
     }
 
     private static void runSecretsScan(List<HttpRequestResponse> baseRequestResponseArray, int taskId, long timeStamp) {
-        List<HttpRequestResponse> uniqueRequests = Utilities.querySiteMap(baseRequestResponseArray, EXTENSION_JS_JSON);
+        // Scan JS/JSON files (as before) and HTML responses. HTML is detected by the response's
+        // Content-Type (not just the ".html" extension), so extensionless HTML pages are covered too.
+        List<HttpRequestResponse> uniqueRequests = Utilities.querySiteMap(
+                baseRequestResponseArray,
+                requestResponse -> Utilities.isValidScanTarget(requestResponse, EXTENSION_JS_JSON)
+                        || Utilities.isHTMLResponse(requestResponse)
+        );
         for (HttpRequestResponse requestResponse : uniqueRequests) {
             scanVerifierExecutor(requestResponse, taskId, TaskName.SECRETS_SCAN, timeStamp, false);
         }

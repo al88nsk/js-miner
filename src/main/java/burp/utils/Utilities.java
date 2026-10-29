@@ -21,6 +21,7 @@ import java.nio.file.*;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
+import java.util.function.Predicate;
 
 import static burp.BurpExtender.*;
 import static burp.utils.Constants.*;
@@ -86,6 +87,13 @@ public final class Utilities {
      *  Query Site Map for specific extensions (including children of the passed Request URL)
      */
     public static List<HttpRequestResponse> querySiteMap(List<HttpRequestResponse> httpReqResArray, String[] queryFileExtensions) {
+        return querySiteMap(httpReqResArray, requestResponse -> isValidScanTarget(requestResponse, queryFileExtensions));
+    }
+
+    /*
+     *  Query Site Map for messages matching the given filter (including children of the passed Request URL)
+     */
+    public static List<HttpRequestResponse> querySiteMap(List<HttpRequestResponse> httpReqResArray, Predicate<HttpRequestResponse> targetFilter) {
         Set<HttpRequestResponse> uniqueRequests = new LinkedHashSet<>();
         for (HttpRequestResponse baseRequestResponse : httpReqResArray) {
             URL baseURL = toURL(baseRequestResponse.request().url());
@@ -96,12 +104,40 @@ public final class Utilities {
             // Get all child URLs from Site Map
             List<HttpRequestResponse> siteMapReqResArray = api.siteMap().requestResponses(SiteMapFilter.prefixFilter(urlPrefix));
             for (HttpRequestResponse requestResponse : siteMapReqResArray) {
-                if (isValidScanTarget(requestResponse, queryFileExtensions)) {
+                if (targetFilter.test(requestResponse)) {
                     uniqueRequests.add(requestResponse);
                 }
             }
         }
         return new ArrayList<>(uniqueRequests);
+    }
+
+    /*
+     *  Returns the response's "Content-Type" header value, lowercased, or an empty string if absent.
+     */
+    public static String getResponseContentType(HttpRequestResponse requestResponse) {
+        if (requestResponse.hasResponse()) {
+            String contentType = requestResponse.response().headerValue("Content-Type");
+            return contentType != null ? contentType.toLowerCase(Locale.ENGLISH) : "";
+        }
+        return "";
+    }
+
+    /*
+     *  True if the response looks like HTML. Detection is based on the response's "Content-Type"
+     *  header (so extensionless URLs such as "/" or "/home" are covered), falling back to the
+     *  ".html"/".htm" file extension only when no "Content-Type" header is present.
+     */
+    public static boolean isHTMLResponse(HttpRequestResponse requestResponse) {
+        if (!requestResponse.hasResponse()) {
+            return false;
+        }
+        String contentType = getResponseContentType(requestResponse);
+        if (!contentType.isEmpty()) {
+            return contentType.contains("text/html") || contentType.contains("application/xhtml+xml");
+        }
+        String path = requestResponse.request().pathWithoutQuery();
+        return path.endsWith(".html") || path.endsWith(".htm");
     }
 
     // Append found matches to be listed in Burp's issues

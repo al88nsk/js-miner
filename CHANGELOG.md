@@ -8,6 +8,7 @@ Notable changes in JS-Miner releases. Other code improvements that usually happe
   - Because a passive scan check must not make new HTTP requests of its own, the **Dependency Confusion** scanner no longer queries the NPM registry during passive scanning (dependencies are still reported as informational findings). Run the "Dependency Confusion" scan from the context menu for the full registry-verified checks.
   - Duplicate issues reported by the passive check (e.g. when the same static file is re-audited) are consolidated via `consolidateIssues`.
   - Manually invoked context-menu scans keep running on the async executor and report through `SiteMap.add(AuditIssue)`, the API's designated out-of-band channel.
+  - The **Secrets** scanner now also scans **HTML responses**. HTML is detected by the response's `Content-Type` header (not just the `.html` extension), so extensionless HTML pages (e.g. `/` or `/home`) are covered as well. The same detection logic is used by the passive scan and by the manual "Secrets" / "Run all passive scans" scans.
 
 ## [1.16] - 2023-05-30
 - Added http-basic auth scan to "Secrets" scanner.
