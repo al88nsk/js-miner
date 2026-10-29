@@ -1,26 +1,31 @@
 package burp.core.scanners;
 
-import burp.*;
+import burp.BurpExtender;
+import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.core.Marker;
+import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.utils.Utilities;
+import com.google.re2j.Matcher;
+import com.google.re2j.Pattern;
 
+import java.net.MalformedURLException;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import com.google.re2j.Matcher;
-import com.google.re2j.Pattern;
 
+import static burp.BurpExtender.mStdErr;
 import static burp.utils.Constants.*;
 import static burp.utils.Utilities.appendFoundMatches;
 import static burp.utils.Utilities.sendNewIssue;
 
 public class SubDomains implements Runnable {
-    private static final IBurpExtenderCallbacks callbacks = BurpExtender.getCallbacks();
-    private static final IExtensionHelpers helpers = callbacks.getHelpers();
-    private final IHttpRequestResponse baseRequestResponse;
+    private static final MontoyaApi api = BurpExtender.getApi();
+    private final HttpRequestResponse baseRequestResponse;
     private final UUID taskUUID;
 
-    public SubDomains(IHttpRequestResponse baseRequestResponse, UUID taskUUID) {
+    public SubDomains(HttpRequestResponse baseRequestResponse, UUID taskUUID) {
         this.baseRequestResponse = baseRequestResponse;
         this.taskUUID = taskUUID;
     }
@@ -29,10 +34,9 @@ public class SubDomains implements Runnable {
     public void run() {
         BurpExtender.getTaskRepository().startTask(taskUUID);
 
-        String responseString = new String(baseRequestResponse.getResponse());
-        String responseBodyString = responseString.substring(helpers.analyzeResponse(baseRequestResponse.getResponse()).getBodyOffset());
+        String responseBodyString = baseRequestResponse.response().body().toString();
         String domainFromReferer = Utilities.getDomainFromReferer(baseRequestResponse);
-        String requestDomain = helpers.analyzeRequest(baseRequestResponse).getUrl().getHost();
+        String requestDomain = getRequestHost(baseRequestResponse);
         String rootDomain;
         // Try to get caller domain from Referer header (to avoid matching cdn subdomains, ..etc.)
         if (domainFromReferer != null) {
@@ -54,8 +58,9 @@ public class SubDomains implements Runnable {
                 if (
                         Utilities.isMatchedDomainValid(matcherSubDomains.group(), rootDomain, requestDomain)
                 ) {
-                    uniqueMatches.add(helpers.urlDecode(matcherSubDomains.group()).getBytes(StandardCharsets.UTF_8));
-                    appendFoundMatches(helpers.urlDecode(matcherSubDomains.group()), uniqueMatchesSB);
+                    String decodedMatch = api.utilities().urlUtils().decode(matcherSubDomains.group());
+                    uniqueMatches.add(decodedMatch.getBytes(StandardCharsets.UTF_8));
+                    appendFoundMatches(decodedMatch, uniqueMatchesSB);
                 }
             }
             reportFinding(baseRequestResponse, uniqueMatchesSB, uniqueMatches);
@@ -63,10 +68,19 @@ public class SubDomains implements Runnable {
         BurpExtender.getTaskRepository().completeTask(taskUUID);
     }
 
-    private static void reportFinding(IHttpRequestResponse baseRequestResponse, StringBuilder allMatchesSB, List<byte[]> uniqueMatches) {
+    private static String getRequestHost(HttpRequestResponse baseRequestResponse) {
+        try {
+            return new URL(baseRequestResponse.request().url()).getHost();
+        } catch (MalformedURLException e) {
+            mStdErr.println("[-] MalformedURLException");
+            return null;
+        }
+    }
+
+    private static void reportFinding(HttpRequestResponse baseRequestResponse, StringBuilder allMatchesSB, List<byte[]> uniqueMatches) {
         if (allMatchesSB.length() > 0) {
             // Get markers of found Cloud URL Matches
-            List<int[]> allMatchesMarkers = Utilities.getMatches(baseRequestResponse.getResponse(), uniqueMatches);
+            List<Marker> allMatchesMarkers = Utilities.getMatches(baseRequestResponse.response().toByteArray(), uniqueMatches);
 
             // report the issue
             sendNewIssue(baseRequestResponse,

@@ -1,25 +1,25 @@
 package burp.core.scanners;
 
-import burp.*;
+import burp.BurpExtender;
+import burp.api.montoya.core.Marker;
+import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.utils.Utilities;
+import com.google.re2j.Matcher;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import com.google.re2j.Matcher;
 
 import static burp.utils.Constants.*;
 import static burp.utils.Utilities.appendFoundMatches;
 import static burp.utils.Utilities.sendNewIssue;
 
 public class CloudURLs implements Runnable {
-    private static final IBurpExtenderCallbacks callbacks = BurpExtender.getCallbacks();
-    private static final IExtensionHelpers helpers = callbacks.getHelpers();
-    private final IHttpRequestResponse baseRequestResponse;
+    private final HttpRequestResponse baseRequestResponse;
     private final UUID taskUUID;
 
-    public CloudURLs(IHttpRequestResponse baseRequestResponse, UUID taskUUID) {
+    public CloudURLs(HttpRequestResponse baseRequestResponse, UUID taskUUID) {
         this.baseRequestResponse = baseRequestResponse;
         this.taskUUID = taskUUID;
     }
@@ -32,8 +32,7 @@ public class CloudURLs implements Runnable {
         List<byte[]> uniqueMatches = new ArrayList<>();
         StringBuilder uniqueMatchesSB = new StringBuilder();
 
-        String responseString = new String(baseRequestResponse.getResponse());
-        String responseBodyString = responseString.substring(helpers.analyzeResponse(baseRequestResponse.getResponse()).getBodyOffset());
+        String responseBodyString = baseRequestResponse.response().body().toString();
 
         Matcher cloudURLsMatcher = CLOUD_URLS_REGEX.matcher(responseBodyString);
 
@@ -48,10 +47,10 @@ public class CloudURLs implements Runnable {
 
     }
 
-    private static void reportFinding(IHttpRequestResponse baseRequestResponse, StringBuilder allMatchesSB, List<byte[]> uniqueMatches) {
+    private static void reportFinding(HttpRequestResponse baseRequestResponse, StringBuilder allMatchesSB, List<byte[]> uniqueMatches) {
         if (allMatchesSB.length() > 0) {
             // Get markers of found Cloud URL Matches
-            List<int[]> allMatchesMarkers = Utilities.getMatches(baseRequestResponse.getResponse(), uniqueMatches);
+            List<Marker> allMatchesMarkers = Utilities.getMatches(baseRequestResponse.response().toByteArray(), uniqueMatches);
 
             // report the issue
             sendNewIssue(baseRequestResponse,

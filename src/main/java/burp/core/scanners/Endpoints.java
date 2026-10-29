@@ -1,9 +1,8 @@
 package burp.core.scanners;
 
 import burp.BurpExtender;
-import burp.IBurpExtenderCallbacks;
-import burp.IExtensionHelpers;
-import burp.IHttpRequestResponse;
+import burp.api.montoya.core.Marker;
+import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.utils.Utilities;
 import com.google.re2j.Matcher;
 import com.google.re2j.Pattern;
@@ -19,12 +18,10 @@ import static burp.utils.Utilities.appendFoundMatches;
 import static burp.utils.Utilities.sendNewIssue;
 
 public class Endpoints implements Runnable {
-    private static final IBurpExtenderCallbacks callbacks = BurpExtender.getCallbacks();
-    private static final IExtensionHelpers helpers = callbacks.getHelpers();
-    private final IHttpRequestResponse baseRequestResponse;
+    private final HttpRequestResponse baseRequestResponse;
     private final UUID taskUUID;
 
-    public Endpoints(IHttpRequestResponse baseRequestResponse, UUID taskUUID) {
+    public Endpoints(HttpRequestResponse baseRequestResponse, UUID taskUUID) {
         this.baseRequestResponse = baseRequestResponse;
         this.taskUUID = taskUUID;
     }
@@ -46,8 +43,7 @@ public class Endpoints implements Runnable {
         List<byte[]> uniqueMatches = new ArrayList<>();
         StringBuilder uniqueMatchesSB = new StringBuilder();
 
-        String responseString = new String(baseRequestResponse.getResponse());
-        String responseBodyString = responseString.substring(helpers.analyzeResponse(baseRequestResponse.getResponse()).getBodyOffset());
+        String responseBodyString = baseRequestResponse.response().body().toString();
         Matcher endpointsMatcher = endpointsPattern.matcher(responseBodyString);
 
         while (BurpExtender.isLoaded() && endpointsMatcher.find() && endpointsMatcher.group(1).contains("/")
@@ -59,10 +55,10 @@ public class Endpoints implements Runnable {
         reportFinding(baseRequestResponse, uniqueMatchesSB, uniqueMatches, method.toUpperCase(Locale.ENGLISH));
     }
 
-    private static void reportFinding(IHttpRequestResponse baseRequestResponse, StringBuilder allMatchesSB, List<byte[]> uniqueMatches, String method) {
+    private static void reportFinding(HttpRequestResponse baseRequestResponse, StringBuilder allMatchesSB, List<byte[]> uniqueMatches, String method) {
         if (allMatchesSB.length() > 0) {
             // Get markers of found Cloud URL Matches
-            List<int[]> allMatchesMarkers = Utilities.getMatches(baseRequestResponse.getResponse(), uniqueMatches);
+            List<Marker> allMatchesMarkers = Utilities.getMatches(baseRequestResponse.response().toByteArray(), uniqueMatches);
 
             // report the issue
             sendNewIssue(baseRequestResponse,

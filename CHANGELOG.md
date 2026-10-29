@@ -1,6 +1,14 @@
 # Burp JS-Miner Changelog
 Notable changes in JS-Miner releases. Other code improvements that usually happen with every release are not mentioned.
 
+## [2.0] - 2026-10-29
+- Migrated the extension to the modern **Montoya API** (`burp.api.montoya`) and fixed the Dashboard reporting path.
+  - The legacy extension API was removed from current Burp Suite versions, which broke the extension.
+  - Passive scans now run **synchronously inside the `PassiveScanCheck`** and report their findings by returning them in the check's `AuditResult` - the documented, Dashboard-integrated path for scanner issues. Previously, issues were reported out-of-band via `SiteMap.add(AuditIssue)`, which is only intended for porting results from other tools and does not surface findings on the Dashboard.
+  - Because a passive scan check must not make new HTTP requests of its own, the **Dependency Confusion** scanner no longer queries the NPM registry during passive scanning (dependencies are still reported as informational findings). Run the "Dependency Confusion" scan from the context menu for the full registry-verified checks.
+  - Duplicate issues reported by the passive check (e.g. when the same static file is re-audited) are consolidated via `consolidateIssues`.
+  - Manually invoked context-menu scans keep running on the async executor and report through `SiteMap.add(AuditIssue)`, the API's designated out-of-band channel.
+
 ## [1.16] - 2023-05-30
 - Added http-basic auth scan to "Secrets" scanner.
 

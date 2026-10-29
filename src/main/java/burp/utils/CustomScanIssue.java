@@ -1,96 +1,71 @@
 package burp.utils;
 
-import burp.IHttpRequestResponse;
-import burp.IHttpService;
-import burp.IScanIssue;
-
-import java.net.URL;
+import burp.api.montoya.http.message.HttpRequestResponse;
+import burp.api.montoya.scanner.audit.issues.AuditIssue;
+import burp.api.montoya.scanner.audit.issues.AuditIssueConfidence;
+import burp.api.montoya.scanner.audit.issues.AuditIssueSeverity;
 
 //
-// class implementing IScanIssue to hold our custom scan issue details
+// Helper class to build a custom (Montoya) audit issue to hold our custom scan issue details
 //
 
-public class CustomScanIssue implements IScanIssue {
-    private final IHttpService httpService;
-    private final URL url;
-    private final IHttpRequestResponse[] httpMessages;
-    private final String name;
-    private final String background;
-    private final String detail;
-    private final String severity;
-    private final String confidence;
+public class CustomScanIssue {
 
-    public CustomScanIssue(
-            IHttpService httpService,
-            URL url,
-            IHttpRequestResponse[] httpMessages,
+    private CustomScanIssue() {
+    }
+
+    /**
+     * Build an {@link AuditIssue} bound to the provided request/response.
+     *
+     * @param httpRequestResponse The HTTP request/response that triggered the issue
+     * @param name                The name of the issue type
+     * @param detail              Detailed information about the issue
+     * @param background          The background description of the issue type
+     * @param severity            The {@link AuditIssueSeverity} level
+     * @param confidence          The {@link AuditIssueConfidence} level
+     */
+    public static AuditIssue create(
+            HttpRequestResponse httpRequestResponse,
             String name,
             String detail,
             String background,
-            String severity,
-            String confidence) {
-        this.httpService = httpService;
-        this.url = url;
-        this.httpMessages = httpMessages;
-        this.name = name;
-        this.detail = detail;
-        this.background = background;
-        this.severity = severity;
-        this.confidence = confidence;
+            AuditIssueSeverity severity,
+            AuditIssueConfidence confidence) {
+        return create(name, detail, background, severity, confidence,
+                httpRequestResponse.request().url(),
+                httpRequestResponse);
     }
 
-    @Override
-    public URL getUrl() {
-        return url;
-    }
-
-    @Override
-    public String getIssueName() {
-        return name;
-    }
-
-    @Override
-    public int getIssueType() {
-        return 0;
-    }
-
-    @Override
-    public String getSeverity() {
-        return severity;
-    }
-
-    @Override
-    public String getConfidence() {
-        return confidence;
-    } // Expected values are "Certain", "Firm" or "Tentative".
-
-    @Override
-    public String getIssueBackground() {
-        return background;
-    }
-
-    @Override
-    public String getRemediationBackground() {
-        return null;
-    }
-
-    @Override
-    public String getIssueDetail() {
-        return detail;
-    }
-
-    @Override
-    public String getRemediationDetail() {
-        return null;
-    }
-
-    @Override
-    public IHttpRequestResponse[] getHttpMessages() {
-        return httpMessages;
-    }
-
-    @Override
-    public IHttpService getHttpService() {
-        return httpService;
+    /**
+     * Build an {@link AuditIssue} with an explicit base URL (useful when the issue is not
+     * tied to a specific request, e.g. the "Static Files Dumper" issue).
+     *
+     * @param name           The name of the issue type
+     * @param detail         Detailed information about the issue
+     * @param background     The background description of the issue type
+     * @param severity       The {@link AuditIssueSeverity} level
+     * @param confidence     The {@link AuditIssueConfidence} level
+     * @param baseUrl        The base URL for which the issue is generated
+     * @param requestResponses Optional HTTP request/response messages associated with the issue
+     */
+    public static AuditIssue create(
+            String name,
+            String detail,
+            String background,
+            AuditIssueSeverity severity,
+            AuditIssueConfidence confidence,
+            String baseUrl,
+            HttpRequestResponse... requestResponses) {
+        return AuditIssue.auditIssue(
+                name,
+                detail,
+                null,
+                baseUrl,
+                severity,
+                confidence,
+                background,
+                null,
+                severity,
+                requestResponses);
     }
 }

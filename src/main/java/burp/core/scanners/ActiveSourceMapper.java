@@ -1,6 +1,9 @@
 package burp.core.scanners;
 
-import burp.*;
+import burp.BurpExtender;
+import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.http.message.HttpRequestResponse;
+import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.utils.SourceMapper;
 import burp.utils.Utilities;
 
@@ -13,17 +16,17 @@ import java.util.UUID;
 import static burp.BurpExtender.mStdErr;
 
 public class ActiveSourceMapper implements Runnable {
-    private static final IBurpExtenderCallbacks callbacks = BurpExtender.getCallbacks();
-    private static final IExtensionHelpers helpers = BurpExtender.getHelpers();
+    private static final MontoyaApi api = BurpExtender.getApi();
     private URL jsMapURL;
     private Path outputDirectory;
     private final UUID taskUUID;
 
-    public ActiveSourceMapper(IHttpRequestResponse requestResponse, long currentTimestamp, UUID taskUUID) {
-        URL jsURL = helpers.analyzeRequest(requestResponse).getUrl();
+    public ActiveSourceMapper(HttpRequestResponse requestResponse, long currentTimestamp, UUID taskUUID) {
+        URL jsURL;
         this.taskUUID = taskUUID;
 
         try {
+            jsURL = new URL(requestResponse.request().url());
             this.jsMapURL = new URL(Utilities.appendURLPath(jsURL, ".map"));
             this.outputDirectory = Paths.get(System.getProperty("user.home"))
                     .resolve(".BurpSuite")
@@ -37,14 +40,14 @@ public class ActiveSourceMapper implements Runnable {
     public void run() {
         try {
             BurpExtender.getTaskRepository().startTask(taskUUID);
-            IHttpRequestResponse newHTTPReqRes = callbacks.makeHttpRequest(Utilities.url2HttpService(jsMapURL), helpers.buildHttpRequest(jsMapURL));
+            HttpRequestResponse newHTTPReqRes = api.http().sendRequest(HttpRequest.httpRequestFromUrl(jsMapURL.toString()));
             // if 200 OK, add to sitemap & pass content to parse map files
-            if (helpers.analyzeResponse(newHTTPReqRes.getResponse()).getStatusCode() == 200
+            if (newHTTPReqRes.hasResponse()
+                    && newHTTPReqRes.response().statusCode() == 200
                     && BurpExtender.isLoaded()
             ) {
-                callbacks.addToSiteMap(newHTTPReqRes);
-                String response = new String(newHTTPReqRes.getResponse());
-                String responseBody = response.substring(helpers.analyzeRequest(newHTTPReqRes.getResponse()).getBodyOffset());
+                api.siteMap().add(newHTTPReqRes);
+                String responseBody = newHTTPReqRes.response().body().toString();
                 // Quick check to see if Response contains what we are looking for
                 if (responseBody.contains("sources") && responseBody.contains("sourcesContent")) {
                     new SourceMapper(

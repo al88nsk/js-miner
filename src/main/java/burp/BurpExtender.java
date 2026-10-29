@@ -1,24 +1,38 @@
 package burp;
 
+import burp.api.montoya.BurpExtension;
+import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.http.message.HttpRequestResponse;
+import burp.api.montoya.scanner.AuditResult;
+import burp.api.montoya.scanner.ConsolidationAction;
+import burp.api.montoya.scanner.audit.issues.AuditIssue;
+import burp.api.montoya.scanner.scancheck.PassiveScanCheck;
+import burp.api.montoya.scanner.scancheck.ScanCheckType;
+import burp.api.montoya.ui.contextmenu.ContextMenuEvent;
+import burp.api.montoya.ui.contextmenu.ContextMenuItemsProvider;
+import burp.api.montoya.ui.contextmenu.InvocationType;
 import burp.config.ExecutorServiceManager;
 import burp.config.ExtensionConfig;
-import burp.core.TaskRepository;
 import burp.core.ScannerBuilder;
+import burp.core.TaskRepository;
+import burp.utils.Utilities;
 
 import javax.swing.*;
+import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.io.PrintWriter;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 
 import static burp.utils.Constants.SETTING_BURP_PASSIVE;
 import static burp.utils.Constants.SETTING_VERBOSE_LOGGING;
 
-public class BurpExtender implements IBurpExtender, IContextMenuFactory, IExtensionStateListener, IScannerCheck {
-    private static IBurpExtenderCallbacks callbacks;
-    private static IExtensionHelpers helpers;
+public class BurpExtender implements BurpExtension, ContextMenuItemsProvider {
+    private static MontoyaApi api;
     private static final ExecutorServiceManager executorServiceManager = ExecutorServiceManager.getInstance();
     private static final TaskRepository taskRepository = TaskRepository.getInstance();
     private static final ExtensionConfig extensionConfig = ExtensionConfig.getInstance();
@@ -26,16 +40,12 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, IExtens
     public static PrintWriter mStdOut;
     public static PrintWriter mStdErr;
     public static final String EXTENSION_NAME = "JS Miner";
-    private static final String EXTENSION_VERSION = "1.16";
+    private static final String EXTENSION_VERSION = "2.0";
     private int taskCount = 0; // counter for invoked tasks through the menu items context (Not for Burp's passive scan)
 
-    // Exposing callbacks for use in other classes
-    public static IBurpExtenderCallbacks getCallbacks() {
-        return callbacks;
-    }
-
-    public static IExtensionHelpers getHelpers() {
-        return helpers;
+    // Exposing the Montoya API for use in other classes
+    public static MontoyaApi getApi() {
+        return api;
     }
 
     public static boolean isLoaded() {
@@ -58,23 +68,25 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, IExtens
         return extensionConfig;
     }
 
-
-
     @Override
-    public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
-        BurpExtender.callbacks = callbacks;
+    @SuppressWarnings("deprecation") // Logging.output()/error() are deprecated in favour of logToOutput/logToError
+    public void initialize(MontoyaApi api) {
+        BurpExtender.api = api;
         // Extension initializations
-        helpers = callbacks.getHelpers();
-        callbacks.setExtensionName(EXTENSION_NAME);
-        callbacks.registerContextMenuFactory(this);
-        callbacks.registerExtensionStateListener(this);
+        api.extension().setName(EXTENSION_NAME);
 
-        // register ourselves as a custom scanner check
-        callbacks.registerScannerCheck(this);
+        // register ourselves as a custom scanner check (passive scans)
+        registerPassiveScanCheck();
+
+        // register a context menu items provider
+        api.userInterface().registerContextMenuItemsProvider(this);
+
+        // register an unloaded handler
+        api.extension().registerUnloadingHandler(this::extensionUnloaded);
 
         // obtain our output and error streams
-        mStdOut = new PrintWriter(callbacks.getStdout(), true);
-        mStdErr = new PrintWriter(callbacks.getStderr(), true);
+        mStdOut = new PrintWriter(api.logging().output(), true);
+        mStdErr = new PrintWriter(api.logging().error(), true);
 
         mStdOut.println("[*] Loaded:\t" + EXTENSION_NAME + " v" + EXTENSION_VERSION);
         mStdOut.println("[*] Author:\tMina M. Edwar (minamo7sen@gmail.com)");
@@ -85,24 +97,61 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, IExtens
 
     }
 
+    private void registerPassiveScanCheck() {
+        api.scanner().registerPassiveScanCheck(new PassiveScanCheck() {
+            @Override
+            public String checkName() {
+                return EXTENSION_NAME + " passive checks";
+            }
+
+            @Override
+            public AuditResult doCheck(HttpRequestResponse baseRequestResponse) {
+                // The passive scans run synchronously here and report their findings through the
+                // returned AuditResult - the path that integrates with Burp's user-driven workflow
+                // (i.e. the Dashboard). Reporting out-of-band via SiteMap.add() is only intended for
+                // porting results from other tools and does not surface issues on the Dashboard.
+                if (!extensionConfig.isPassiveEnabled() || !isLoaded()) {
+                    return AuditResult.auditResult();
+                }
+                Utilities.beginIssueCollection();
+                try {
+                    ScannerBuilder.runPassiveScansSynchronously(baseRequestResponse);
+                } catch (Exception e) {
+                    // Never let a passive scan error kill Burp's audit thread
+                    mStdErr.println("[-] Passive scan error: " + e.getMessage());
+                }
+                return AuditResult.auditResult(Utilities.finishIssueCollection());
+            }
+
+            @Override
+            public ConsolidationAction consolidateIssues(AuditIssue existingIssue, AuditIssue newIssue) {
+                // Combine identical issues reported more than once for the same URL path
+                // (e.g. when the same static file is re-audited)
+                if (Objects.equals(existingIssue.name(), newIssue.name())
+                        && Objects.equals(existingIssue.detail(), newIssue.detail())) {
+                    return ConsolidationAction.KEEP_EXISTING;
+                }
+                return ConsolidationAction.KEEP_BOTH;
+            }
+        }, ScanCheckType.PER_REQUEST);
+    }
+
     private void updateExtensionConfig() {
-        callbacks.saveExtensionSetting(SETTING_VERBOSE_LOGGING, String.valueOf(extensionConfig.isVerboseLogging()));
-        callbacks.saveExtensionSetting(SETTING_BURP_PASSIVE, String.valueOf(extensionConfig.isPassiveEnabled()));
+        api.persistence().preferences().setString(SETTING_VERBOSE_LOGGING, String.valueOf(extensionConfig.isVerboseLogging()));
+        api.persistence().preferences().setString(SETTING_BURP_PASSIVE, String.valueOf(extensionConfig.isPassiveEnabled()));
     }
 
     public void loadExtensionConfig() {
-        if (callbacks.loadExtensionSetting(SETTING_VERBOSE_LOGGING) != null) {
-            extensionConfig.setVerboseLogging(Boolean.parseBoolean(callbacks.loadExtensionSetting(SETTING_VERBOSE_LOGGING)));
+        if (api.persistence().preferences().getString(SETTING_VERBOSE_LOGGING) != null) {
+            extensionConfig.setVerboseLogging(Boolean.parseBoolean(api.persistence().preferences().getString(SETTING_VERBOSE_LOGGING)));
         }
 
-        if (callbacks.loadExtensionSetting(SETTING_BURP_PASSIVE) != null) {
-            extensionConfig.setPassiveEnabled(Boolean.parseBoolean(callbacks.loadExtensionSetting(SETTING_BURP_PASSIVE)));
+        if (api.persistence().preferences().getString(SETTING_BURP_PASSIVE) != null) {
+            extensionConfig.setPassiveEnabled(Boolean.parseBoolean(api.persistence().preferences().getString(SETTING_BURP_PASSIVE)));
         }
 
     }
 
-
-    @Override
     public void extensionUnloaded() {
         setLoaded(false);
         taskRepository.destroy();
@@ -116,21 +165,25 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, IExtens
      *  Context menu items
      */
     @Override
-    public List<JMenuItem> createMenuItems(IContextMenuInvocation invocation) {
-        List<JMenuItem> items = new ArrayList<>();
-        JMenu scanItems = new JMenu("Scans");
-        JMenu logItems = new JMenu("Log");
-        JMenu configItems = new JMenu("Config");
+    public List<Component> provideMenuItems(ContextMenuEvent invocation) {
+        if (invocation.isFrom(
+                InvocationType.SITE_MAP_TREE,
+                InvocationType.SITE_MAP_TABLE,
+                InvocationType.PROXY_HISTORY,
+                InvocationType.MESSAGE_VIEWER_REQUEST,
+                InvocationType.MESSAGE_VIEWER_RESPONSE,
+                InvocationType.MESSAGE_EDITOR_REQUEST,
+                InvocationType.MESSAGE_EDITOR_RESPONSE
+        )) {
+            List<HttpRequestResponse> selectedMessages = getSelectedMessages(invocation);
+            if (selectedMessages.isEmpty()) {
+                return null;
+            }
 
-        if (IContextMenuInvocation.CONTEXT_TARGET_SITE_MAP_TABLE == invocation.getInvocationContext() ||
-                IContextMenuInvocation.CONTEXT_TARGET_SITE_MAP_TREE == invocation.getInvocationContext() ||
-                IContextMenuInvocation.CONTEXT_PROXY_HISTORY == invocation.getInvocationContext() ||
-                IContextMenuInvocation.CONTEXT_MESSAGE_VIEWER_REQUEST == invocation.getInvocationContext() ||
-                IContextMenuInvocation.CONTEXT_MESSAGE_VIEWER_RESPONSE == invocation.getInvocationContext() ||
-                IContextMenuInvocation.CONTEXT_MESSAGE_EDITOR_REQUEST == invocation.getInvocationContext() ||
-                IContextMenuInvocation.CONTEXT_MESSAGE_EDITOR_RESPONSE == invocation.getInvocationContext()
-        ) {
-            IHttpRequestResponse[] selectedMessages = invocation.getSelectedMessages();
+            List<Component> items = new ArrayList<>();
+            JMenu scanItems = new JMenu("Scans");
+            JMenu logItems = new JMenu("Log");
+            JMenu configItems = new JMenu("Config");
 
             // === Main Scans Menu Items ==== //
             JMenuItem autoMineItem = new JMenuItem("Run JS Auto-Mine (check everything)");
@@ -209,17 +262,30 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, IExtens
             items.add(configItems);
             items.add(scanItems);
             items.add(logItems);
+
+            return items;
         }
-        return items;
+        return null;
+    }
+
+    /*
+     *  Get the selected HTTP messages for the current context menu invocation.
+     *  For the message viewer/editor contexts, the message being displayed is used.
+     */
+    private static List<HttpRequestResponse> getSelectedMessages(ContextMenuEvent invocation) {
+        if (invocation.messageEditorRequestResponse().isPresent()) {
+            return Collections.singletonList(invocation.messageEditorRequestResponse().get().requestResponse());
+        }
+        return invocation.selectedRequestResponses();
     }
 
     /*
      *  Action menu items
      */
     class SecretsItemAction implements ActionListener {
-        private final IHttpRequestResponse[] httpReqResArray;
+        private final List<HttpRequestResponse> httpReqResArray;
 
-        SecretsItemAction(IHttpRequestResponse[] httpReqResArr) {
+        SecretsItemAction(List<HttpRequestResponse> httpReqResArr) {
             this.httpReqResArray = httpReqResArr;
         }
 
@@ -236,9 +302,9 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, IExtens
     }
 
     class DependencyConfusionItemAction implements ActionListener {
-        private final IHttpRequestResponse[] httpReqResArray;
+        private final List<HttpRequestResponse> httpReqResArray;
 
-        DependencyConfusionItemAction(IHttpRequestResponse[] httpReqResArr) {
+        DependencyConfusionItemAction(List<HttpRequestResponse> httpReqResArr) {
             this.httpReqResArray = httpReqResArr;
         }
 
@@ -255,9 +321,9 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, IExtens
     }
 
     class SubDomainsItemAction implements ActionListener {
-        private final IHttpRequestResponse[] httpReqResArray;
+        private final List<HttpRequestResponse> httpReqResArray;
 
-        SubDomainsItemAction(IHttpRequestResponse[] httpReqResArr) {
+        SubDomainsItemAction(List<HttpRequestResponse> httpReqResArr) {
             this.httpReqResArray = httpReqResArr;
         }
 
@@ -274,9 +340,9 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, IExtens
     }
 
     class CloudURLsItemAction implements ActionListener {
-        private final IHttpRequestResponse[] httpReqResArray;
+        private final List<HttpRequestResponse> httpReqResArray;
 
-        CloudURLsItemAction(IHttpRequestResponse[] httpReqResArr) {
+        CloudURLsItemAction(List<HttpRequestResponse> httpReqResArr) {
             this.httpReqResArray = httpReqResArr;
         }
 
@@ -293,9 +359,9 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, IExtens
     }
 
     class InlineSourceMapsItemAction implements ActionListener {
-        private final IHttpRequestResponse[] httpReqResArray;
+        private final List<HttpRequestResponse> httpReqResArray;
 
-        InlineSourceMapsItemAction(IHttpRequestResponse[] httpReqResArr) {
+        InlineSourceMapsItemAction(List<HttpRequestResponse> httpReqResArr) {
             this.httpReqResArray = httpReqResArr;
         }
 
@@ -315,9 +381,9 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, IExtens
     }
 
     class ActiveSourceMapsItemAction implements ActionListener {
-        private final IHttpRequestResponse[] httpReqResArray;
+        private final List<HttpRequestResponse> httpReqResArray;
 
-        ActiveSourceMapsItemAction(IHttpRequestResponse[] httpReqResArr) {
+        ActiveSourceMapsItemAction(List<HttpRequestResponse> httpReqResArr) {
             this.httpReqResArray = httpReqResArr;
         }
 
@@ -337,9 +403,9 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, IExtens
     }
 
     class JSAutoMineItemAction implements ActionListener {
-        private final IHttpRequestResponse[] httpReqResArray;
+        private final List<HttpRequestResponse> httpReqResArray;
 
-        JSAutoMineItemAction(IHttpRequestResponse[] httpReqResArr) {
+        JSAutoMineItemAction(List<HttpRequestResponse> httpReqResArr) {
             this.httpReqResArray = httpReqResArr;
         }
 
@@ -359,9 +425,9 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, IExtens
     }
 
     class AllPassiveScansItemAction implements ActionListener {
-        private final IHttpRequestResponse[] httpReqResArray;
+        private final List<HttpRequestResponse> httpReqResArray;
 
-        AllPassiveScansItemAction(IHttpRequestResponse[] httpReqResArr) {
+        AllPassiveScansItemAction(List<HttpRequestResponse> httpReqResArr) {
             this.httpReqResArray = httpReqResArr;
         }
 
@@ -381,9 +447,9 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, IExtens
     }
 
     class DumpStaticFilesItemAction implements ActionListener {
-        private final IHttpRequestResponse[] httpReqResArray;
+        private final List<HttpRequestResponse> httpReqResArray;
 
-        DumpStaticFilesItemAction(IHttpRequestResponse[] httpReqResArr) {
+        DumpStaticFilesItemAction(List<HttpRequestResponse> httpReqResArr) {
             this.httpReqResArray = httpReqResArr;
         }
 
@@ -403,9 +469,9 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, IExtens
     }
 
     class EndpointsFinderItemAction implements ActionListener {
-        private final IHttpRequestResponse[] httpReqResArray;
+        private final List<HttpRequestResponse> httpReqResArray;
 
-        EndpointsFinderItemAction(IHttpRequestResponse[] httpReqResArr) {
+        EndpointsFinderItemAction(List<HttpRequestResponse> httpReqResArr) {
             this.httpReqResArray = httpReqResArr;
         }
 
@@ -472,33 +538,4 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, IExtens
             updateExtensionConfig();
         }
     }
-
-    @Override
-    public List<IScanIssue> doPassiveScan(IHttpRequestResponse baseRequestResponse) {
-        if (extensionConfig.isPassiveEnabled()) {
-            new Thread(() -> {
-                // run passive scans against JS/JSON files
-                long ts = Instant.now().toEpochMilli();
-                ScannerBuilder scannerBuilder = new ScannerBuilder.Builder(new IHttpRequestResponse[]{baseRequestResponse})
-                        .runAllPassiveScans()
-                        .timeStamp(ts)
-                        .build();
-                scannerBuilder.runScans();
-            }).start();
-        }
-        return null;
-    }
-
-    @Override
-    public List<IScanIssue> doActiveScan(IHttpRequestResponse baseRequestResponse, IScannerInsertionPoint insertionPoint) {
-        return null;
-    }
-
-    @Override
-    public int consolidateDuplicateIssues(IScanIssue existingIssue, IScanIssue newIssue) {
-        if (existingIssue.getIssueName().equals(newIssue.getIssueName()))
-            return -1;
-        else return 0;
-    }
-
 }

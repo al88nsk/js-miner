@@ -20,8 +20,9 @@ This tool tries to help with this "initial" recon phase, which should be followe
 ### Cloud URLs (passive)
 - Support for (AWS, Azure, Google, CloudFront, Digital Ocean, Oracle, Alibaba, Firebase, Rackspace, Dream Host)
 
-### Dependency Confusion (passive but connects to NPM JS registry to verify the issue)
-- Reports a critical issue when a dependency or an organization is missing from the NPM registry.
+### Dependency Confusion (passive, with NPM registry verification on manual scans)
+- Reports a critical issue when a dependency or an organization is missing from the NPM registry (verified by querying the NPM registry).
+- During passive scanning, only the informational "dependencies found" issue is reported (a passive scan check must not make new HTTP requests of its own). Use the "Dependency Confusion" context-menu scan to get the full registry-verified checks.
 - Reports informational issues for identified dependencies.
 
 ### JS Source Mapper (active and passive)
@@ -69,6 +70,8 @@ cd burp-JS-Miner
 gradle fatJar
 ```
 Then, the jar file can be found at `build/libs/burp-JS-Miner-all.jar`.
+
+> Requires Java 17+ (the current Burp Suite / Montoya API requirement). The produced jar must be loaded into a current Burp Suite version (which ships the Montoya API).
 
 
 ## Disclaimer

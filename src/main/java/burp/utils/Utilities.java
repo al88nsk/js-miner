@@ -1,6 +1,16 @@
 package burp.utils;
 
-import burp.*;
+import burp.BurpExtender;
+import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.core.ByteArray;
+import burp.api.montoya.core.Marker;
+import burp.api.montoya.http.message.HttpRequestResponse;
+import burp.api.montoya.sitemap.SiteMapFilter;
+import burp.api.montoya.scanner.audit.issues.AuditIssue;
+import burp.api.montoya.scanner.audit.issues.AuditIssueConfidence;
+import burp.api.montoya.scanner.audit.issues.AuditIssueSeverity;
+import com.google.re2j.Matcher;
+import com.google.re2j.Pattern;
 
 import java.io.IOException;
 import java.net.MalformedURLException;
@@ -11,8 +21,6 @@ import java.nio.file.*;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
-import com.google.re2j.Matcher;
-import com.google.re2j.Pattern;
 
 import static burp.BurpExtender.*;
 import static burp.utils.Constants.*;
@@ -23,17 +31,50 @@ public final class Utilities {
     private Utilities() {
     }
 
-    private static final IBurpExtenderCallbacks callbacks = BurpExtender.getCallbacks();
-    private static final IExtensionHelpers helpers = BurpExtender.getHelpers();
+    private static final MontoyaApi api = BurpExtender.getApi();
+
+    /*
+     *  Issue collection for the passive scan check.
+     *  When a thread-local collector is active (set by the passive scan check), findings are
+     *  collected and returned to Burp through the scan check's AuditResult - the Dashboard
+     *  integrated reporting path. Otherwise (manually invoked context-menu scans), findings
+     *  are reported out-of-band through SiteMap.add(AuditIssue), which is the API's designated
+     *  mechanism for tasks outside the normal testing workflow.
+     */
+    private static final ThreadLocal<List<AuditIssue>> PASSIVE_ISSUE_COLLECTOR = new ThreadLocal<>();
+
+    public static void beginIssueCollection() {
+        PASSIVE_ISSUE_COLLECTOR.set(new ArrayList<>());
+    }
+
+    public static List<AuditIssue> finishIssueCollection() {
+        List<AuditIssue> issues = PASSIVE_ISSUE_COLLECTOR.get();
+        PASSIVE_ISSUE_COLLECTOR.remove();
+        return issues != null ? issues : Collections.emptyList();
+    }
+
+    /**
+     * Safe {@link URL} builder for URLs reported by Burp (which are always valid absolute URLs).
+     * Returns {@code null} on malformed input.
+     */
+    public static URL toURL(String url) {
+        try {
+            return new URL(url);
+        } catch (MalformedURLException e) {
+            mStdErr.println("[-] MalformedURLException: " + url);
+            return null;
+        }
+    }
 
     /*
      *  This is mainly used by the "querySiteMap" function
      *  Checks if the HTTP Response is not null and that the Requested file is either JS or JSON
      */
-    public static boolean isValidScanTarget(IHttpRequestResponse baseRequestResponse, String[] queryFileExtensions) {
-        if (baseRequestResponse.getResponse() != null && BurpExtender.isLoaded()) {
+    public static boolean isValidScanTarget(HttpRequestResponse baseRequestResponse, String[] queryFileExtensions) {
+        if (baseRequestResponse.hasResponse() && BurpExtender.isLoaded()) {
             for (String fileExtension: queryFileExtensions) {
-                if (helpers.analyzeRequest(baseRequestResponse).getUrl().getPath().endsWith("." + fileExtension)) {
+                // pathWithoutQuery() to ignore query strings (e.g. "/app.js?v=1" still matches ".js")
+                if (baseRequestResponse.request().pathWithoutQuery().endsWith("." + fileExtension)) {
                     return true;
                 }
             }
@@ -44,19 +85,23 @@ public final class Utilities {
     /*
      *  Query Site Map for specific extensions (including children of the passed Request URL)
      */
-    public static Set<IHttpRequestResponse> querySiteMap(IHttpRequestResponse[] httpReqResArray, String[] queryFileExtensions) {
-        HashSet<IHttpRequestResponse> uniqueRequests = new HashSet<>();
-        for (IHttpRequestResponse baseRequestResponse : httpReqResArray) {
-            URL url = helpers.analyzeRequest(baseRequestResponse).getUrl();
+    public static List<HttpRequestResponse> querySiteMap(List<HttpRequestResponse> httpReqResArray, String[] queryFileExtensions) {
+        Set<HttpRequestResponse> uniqueRequests = new LinkedHashSet<>();
+        for (HttpRequestResponse baseRequestResponse : httpReqResArray) {
+            URL baseURL = toURL(baseRequestResponse.request().url());
+            if (baseURL == null) {
+                continue;
+            }
+            String urlPrefix = getURLPrefix(baseURL);
             // Get all child URLs from Site Map
-            IHttpRequestResponse[] siteMapReqResArray = callbacks.getSiteMap(Utilities.getURL(url));
-            for (IHttpRequestResponse requestResponse : siteMapReqResArray) {
+            List<HttpRequestResponse> siteMapReqResArray = api.siteMap().requestResponses(SiteMapFilter.prefixFilter(urlPrefix));
+            for (HttpRequestResponse requestResponse : siteMapReqResArray) {
                 if (isValidScanTarget(requestResponse, queryFileExtensions)) {
                     uniqueRequests.add(requestResponse);
                 }
             }
         }
-        return uniqueRequests;
+        return new ArrayList<>(uniqueRequests);
     }
 
     // Append found matches to be listed in Burp's issues
@@ -73,41 +118,40 @@ public final class Utilities {
      * An improved version of the getMatches method to search an HTTP response for occurrences of a unique matches
      * and return a sorted list of start/end offsets
      */
-    public static List<int[]> getMatches(byte[] response, List<byte[]> uniqueMatches)
+    public static List<Marker> getMatches(ByteArray response, List<byte[]> uniqueMatches)
     {
-        List<int[]> matches = new ArrayList<>();
+        List<Marker> matches = new ArrayList<>();
 
         for (byte[] match: uniqueMatches) {
+            ByteArray matchByteArray = ByteArray.byteArray(match);
             // Limit Response highlighters (matches) only to 500 then break (to maintain performance)
             if (matches.size() < 500) {
                 int start = 0;
-                while (start < response.length)
+                while (start < response.length())
                 {
-                    start = helpers.indexOf(response, match, false, start, response.length);
+                    start = response.indexOf(matchByteArray, false, start, response.length());
                     if (start == -1)
                         break;
-                    matches.add(new int[] { start, start + match.length });
-                    start += match.length;
+                    matches.add(Marker.marker(start, start + matchByteArray.length()));
+                    start += matchByteArray.length();
                 }
             } else {
                 break;
             }
         }
         // Sort found matches or otherwise Burp will complain (Source: https://stackoverflow.com/questions/19596950/sort-an-arraylist-of-integer-arrays)
-        matches.sort(new Comparator<int[]>() {
-            private static final int INDEX = 0;
-
+        matches.sort(new Comparator<Marker>() {
             @Override
-            public int compare(int[] o1, int[] o2) {
-                return Integer.compare(o1[INDEX], o2[INDEX]);
+            public int compare(Marker o1, Marker o2) {
+                return Integer.compare(o1.range().startIndexInclusive(), o2.range().startIndexInclusive());
             }
         });
 
         // Dirty trick to fix overlapping offsets
         for (int i = 0; i < matches.size(); i++) {
             if (i + 1 != matches.size()
-                    && matches.get(i)[1] > matches.get(i + 1)[0]) {
-                int[] fixed = {matches.get(i)[0], matches.get(i + 1)[0]};
+                    && matches.get(i).range().endIndexExclusive() > matches.get(i + 1).range().startIndexInclusive()) {
+                Marker fixed = Marker.marker(matches.get(i).range().startIndexInclusive(), matches.get(i + 1).range().startIndexInclusive());
                 matches.set(i, fixed);
             }
         }
@@ -116,12 +160,11 @@ public final class Utilities {
     }
 
 
-    public static byte[] getHTTPResponseBodyHash(IHttpRequestResponse baseRequestResponse) {
-        if (baseRequestResponse.getResponse() != null) {
+    public static byte[] getHTTPResponseBodyHash(HttpRequestResponse baseRequestResponse) {
+        if (baseRequestResponse.hasResponse()) {
             // Get bytes of Response content
-            int bodyOffset = helpers.analyzeRequest(baseRequestResponse.getResponse()).getBodyOffset();
-            byte[] responseBytes = baseRequestResponse.getResponse();
-            byte[] responseBodyBytes = Arrays.copyOfRange(responseBytes, bodyOffset, responseBytes.length);
+            ByteArray responseBody = baseRequestResponse.response().body();
+            byte[] responseBodyBytes = responseBody.getBytes();
             MessageDigest digest = null;
             try {
                 digest = MessageDigest.getInstance("SHA-256");
@@ -137,18 +180,19 @@ public final class Utilities {
 
     // template issue for interesting stuff
     public static void sendNewIssue(
-            IHttpRequestResponse baseRequestResponse,
+            HttpRequestResponse baseRequestResponse,
             String issueName,
             String description,
             String issueHighlight,
-            List<int[]> responseMarkers,
-            String severity,
-            String confidence
+            List<Marker> responseMarkers,
+            AuditIssueSeverity severity,
+            AuditIssueConfidence confidence
     ) {
-        IScanIssue newCustomIssue = new CustomScanIssue(
-                baseRequestResponse.getHttpService(),
-                helpers.analyzeRequest(baseRequestResponse).getUrl(),
-                new IHttpRequestResponse[]{callbacks.applyMarkers(baseRequestResponse, null, responseMarkers)},
+        // Apply markers to the response so the matches are highlighted in the HTTP response
+        HttpRequestResponse markedRequestResponse = baseRequestResponse.withResponseMarkers(responseMarkers);
+
+        AuditIssue newCustomIssue = CustomScanIssue.create(
+                markedRequestResponse,
                 issueName,
                 SCAN_ISSUE_HEADER +
                         description +
@@ -159,31 +203,48 @@ public final class Utilities {
                         "<br>",
                 null,
                 severity,
-                confidence);
+                confidence
+        );
 
-        Utilities.reportIssueIfNotDuplicate(newCustomIssue, baseRequestResponse);
-
+        Utilities.reportIssueIfNotDuplicate(newCustomIssue);
     }
 
-    public static void reportIssueIfNotDuplicate(IScanIssue iScanIssue, IHttpRequestResponse baseRequestResponse) {
+    public static void reportIssueIfNotDuplicate(AuditIssue auditIssue) {
         synchronized (Utilities.class) {
-            if (isNewIssue(iScanIssue, helpers.analyzeRequest(baseRequestResponse).getUrl())) {
-                callbacks.addScanIssue(iScanIssue);
+            List<AuditIssue> pendingIssues = PASSIVE_ISSUE_COLLECTOR.get();
+            if (pendingIssues != null) {
+                // Passive scans (invoked synchronously from the passive scan check): collect the
+                // issue so it can be returned to Burp via the check's AuditResult.
+                if (isNewIssue(auditIssue, pendingIssues)) {
+                    pendingIssues.add(auditIssue);
+                }
+            } else if (isNewIssue(auditIssue, null)) {
+                // Manually-invoked scans: report out-of-band to Burp's site map.
+                api.siteMap().add(auditIssue);
             }
         }
     }
 
-    private static boolean isNewIssue(IScanIssue scanIssueCheck, URL targetURL) {
-        String urlPrefix = Utilities.getURLPrefix(targetURL);
-        IScanIssue[] allIssues = getCallbacks().getScanIssues(urlPrefix);
-        for (IScanIssue scanIssue : allIssues) {
-            if (scanIssue.getIssueName().equals(scanIssueCheck.getIssueName())
-                    && scanIssue.getIssueDetail().equals(scanIssueCheck.getIssueDetail())
-            ) {
+    private static boolean isNewIssue(AuditIssue auditIssueCheck, List<AuditIssue> extraIssues) {
+        List<AuditIssue> allIssues = api.siteMap().issues();
+        for (AuditIssue auditIssue : allIssues) {
+            if (isSameIssue(auditIssue, auditIssueCheck)) {
                 return false;
             }
         }
+        if (extraIssues != null) {
+            for (AuditIssue auditIssue : extraIssues) {
+                if (isSameIssue(auditIssue, auditIssueCheck)) {
+                    return false;
+                }
+            }
+        }
         return true;
+    }
+
+    private static boolean isSameIssue(AuditIssue issueA, AuditIssue issueB) {
+        return Objects.equals(issueA.name(), issueB.name())
+                && Objects.equals(issueA.detail(), issueB.detail());
     }
 
     public static URL trimURL(URL url) {
@@ -210,18 +271,14 @@ public final class Utilities {
     /**
      * Get domain from "Referer" header to search the caller domain instead of a cdn for example
      */
-    public static String getDomainFromReferer(IHttpRequestResponse baseRequestResponse) {
-        List<String> requestHeadersList = helpers.analyzeRequest(baseRequestResponse).getHeaders();
-        String domain;
-        for (String header : requestHeadersList) {
-            if (header.startsWith("Referer:")) {
-                domain = header.replaceAll("^Referer: ", "");
-                try {
-                    URI domainURI = new URI(domain);
-                    return getRootDomain(domainURI.getHost());
-                } catch (URISyntaxException e) {
-                    mStdErr.println("[-] URI syntax error.");
-                }
+    public static String getDomainFromReferer(HttpRequestResponse baseRequestResponse) {
+        String referer = baseRequestResponse.request().headerValue("Referer");
+        if (referer != null) {
+            try {
+                URI domainURI = new URI(referer);
+                return getRootDomain(domainURI.getHost());
+            } catch (URISyntaxException e) {
+                mStdErr.println("[-] URI syntax error.");
             }
         }
         return null;
@@ -275,16 +332,17 @@ public final class Utilities {
      * helper method to search a response for occurrences of a literal match string
      * and return a list of start/end offsets
      */
-    public static List<int[]> getMatches(byte[] response, byte[] match) {
-        List<int[]> matches = new ArrayList<>();
+    public static List<Marker> getMatches(ByteArray response, byte[] match) {
+        List<Marker> matches = new ArrayList<>();
+        ByteArray matchByteArray = ByteArray.byteArray(match);
 
         int start = 0;
-        while (start < response.length) {
-            start = helpers.indexOf(response, match, true, start, response.length);
+        while (start < response.length()) {
+            start = response.indexOf(matchByteArray, true, start, response.length());
             if (start == -1)
                 break;
-            matches.add(new int[]{start, start + match.length});
-            start += match.length;
+            matches.add(Marker.marker(start, start + matchByteArray.length()));
+            start += matchByteArray.length();
         }
 
         return matches;
@@ -341,33 +399,6 @@ public final class Utilities {
         }
     }
 
-    // Build IHttpService object from a URL (to use it for "makeHttpRequest")
-    public static IHttpService url2HttpService(URL url) {
-        return new IHttpService() {
-            @Override
-            // This is the actual host
-            public String getHost() {
-                return url.getHost();
-            }
-
-            @Override
-            public int getPort() {
-                if ((url.getPort() == -1) && (url.getProtocol().equals("https"))) {
-                    return 443;
-                } else if ((url.getPort() == -1) && (url.getProtocol().equals("http"))) {
-                    return 80;
-                } else {
-                    return url.getPort();
-                }
-            }
-
-            @Override
-            public String getProtocol() {
-                return url.getProtocol();
-            }
-        };
-    }
-
     public static String getURL(URL url) {
         String urlString = url.toString();
         if (url.getDefaultPort() == url.getPort()) { // https://example.com:443/index -> https://example.com/index
@@ -391,19 +422,8 @@ public final class Utilities {
         }
     }
 
-    public static String getURLPrefix(IHttpRequestResponse httpRequestResponse) {
-        URL url = helpers.analyzeRequest(httpRequestResponse).getUrl();
-        if (url.getDefaultPort() == url.getPort()) {
-            return url.getProtocol() + "://" +
-                    url.getHost() +
-                    url.getPath();
-        } else {
-            return url.getProtocol() + "://" +
-                    url.getHost() +
-                    ":" +
-                    url.getPort() +
-                    url.getPath();
-        }
+    public static String getURLPrefix(HttpRequestResponse httpRequestResponse) {
+        return getURLPrefix(toURL(httpRequestResponse.request().url()));
     }
 
     public static String appendURLPath(URL url, String appendedPath) {

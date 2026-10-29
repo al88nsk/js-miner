@@ -1,24 +1,24 @@
 package burp.core.scanners;
 
-import burp.*;
+import burp.BurpExtender;
+import burp.api.montoya.core.Marker;
+import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.utils.Utilities;
+import com.google.re2j.Matcher;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import com.google.re2j.Matcher;
 
 import static burp.utils.Constants.*;
 import static burp.utils.Utilities.*;
 
 public class Secrets implements Runnable {
-    private static final IBurpExtenderCallbacks callbacks = BurpExtender.getCallbacks();
-    private static final IExtensionHelpers helpers = callbacks.getHelpers();
-    private final IHttpRequestResponse baseRequestResponse;
+    private final HttpRequestResponse baseRequestResponse;
     private final UUID taskUUID;
 
-    public Secrets(IHttpRequestResponse baseRequestResponse, UUID taskUUID) {
+    public Secrets(HttpRequestResponse baseRequestResponse, UUID taskUUID) {
         this.baseRequestResponse = baseRequestResponse;
         this.taskUUID = taskUUID;
     }
@@ -26,8 +26,7 @@ public class Secrets implements Runnable {
     @Override
     public void run() {
         BurpExtender.getTaskRepository().startTask(taskUUID);
-        String responseString = new String(baseRequestResponse.getResponse());
-        String responseBodyString = responseString.substring(helpers.analyzeResponse(baseRequestResponse.getResponse()).getBodyOffset());
+        String responseBodyString = baseRequestResponse.response().body().toString();
 
         // Combined secrets
         Matcher matcherSecrets = SECRETS_REGEX.matcher(responseBodyString);
@@ -72,10 +71,10 @@ public class Secrets implements Runnable {
         BurpExtender.getTaskRepository().completeTask(taskUUID);
     }
 
-    private static void reportFinding(IHttpRequestResponse baseRequestResponse, StringBuilder uniqueMatchesSBLow, List<byte[]> uniqueMatchesLow,
+    private static void reportFinding(HttpRequestResponse baseRequestResponse, StringBuilder uniqueMatchesSBLow, List<byte[]> uniqueMatchesLow,
                                       StringBuilder uniqueMatchesSBHigh, List<byte[]> uniqueMatchesHigh) {
         if (uniqueMatchesSBHigh.length() > 0) {
-            List<int[]> secretsMatchesHigh = getMatches(baseRequestResponse.getResponse(), uniqueMatchesHigh);
+            List<Marker> secretsMatchesHigh = getMatches(baseRequestResponse.response().toByteArray(), uniqueMatchesHigh);
             sendNewIssue(baseRequestResponse,
                     "[JS Miner] Secrets / Credentials",
                     "The following secrets (with High entropy) were found in a static file.",
@@ -87,7 +86,7 @@ public class Secrets implements Runnable {
         }
 
         if (uniqueMatchesSBLow.length() > 0) {
-            List<int[]> secretsMatchesLow = getMatches(baseRequestResponse.getResponse(), uniqueMatchesLow);
+            List<Marker> secretsMatchesLow = getMatches(baseRequestResponse.response().toByteArray(), uniqueMatchesLow);
             sendNewIssue(baseRequestResponse,
                     "[JS Miner] Secrets / Credentials",
                     "The following secrets (with Low entropy) were found in a static file.",
