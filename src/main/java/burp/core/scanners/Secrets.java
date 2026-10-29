@@ -3,12 +3,15 @@ package burp.core.scanners;
 import burp.BurpExtender;
 import burp.api.montoya.core.Marker;
 import burp.api.montoya.http.message.HttpRequestResponse;
+import burp.utils.SecretPattern;
+import burp.utils.SecretPatterns;
 import burp.utils.Utilities;
 import com.google.re2j.Matcher;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 import static burp.utils.Constants.*;
@@ -68,7 +71,64 @@ public class Secrets implements Runnable {
 
         reportFinding(baseRequestResponse, uniqueMatchesSBLow, uniqueMatchesLow, uniqueMatchesSBHigh, uniqueMatchesHigh);
 
+        // Pattern-based detection of known secret tokens (GitHub tokens, JWTs, cloud/SaaS keys, ...)
+        scanKnownSecretTokens(baseRequestResponse, responseBodyString);
+
         BurpExtender.getTaskRepository().completeTask(taskUUID);
+    }
+
+    /*
+     *  Detect well-known hardcoded secret token formats (e.g. GitHub tokens, JWTs, API keys)
+     *  using the pattern list from SecretPatterns. Each pattern reports its own issue, so the
+     *  severity/confidence of the token format is preserved.
+     */
+    private static void scanKnownSecretTokens(HttpRequestResponse baseRequestResponse, String responseBodyString) {
+        for (SecretPattern secretPattern : SecretPatterns.ALL) {
+            if (!BurpExtender.isLoaded() || secretPattern.pattern == null) {
+                continue;
+            }
+            // For reporting unique matches with markers
+            List<byte[]> uniqueMatches = new ArrayList<>();
+            StringBuilder uniqueMatchesSB = new StringBuilder();
+
+            Matcher patternMatcher = secretPattern.pattern.matcher(responseBodyString);
+            while (patternMatcher.find() && BurpExtender.isLoaded()) {
+                String matchedToken = patternMatcher.group();
+                // Skip documentation examples / placeholders (e.g. "ghp_xxxx...", "your_token_here")
+                if (isLikelyPlaceholder(matchedToken)) {
+                    continue;
+                }
+                uniqueMatches.add(matchedToken.getBytes(StandardCharsets.UTF_8));
+                appendFoundMatches(matchedToken, uniqueMatchesSB);
+            }
+
+            if (uniqueMatchesSB.length() > 0) {
+                List<Marker> tokenMatches = getMatches(baseRequestResponse.response().toByteArray(), uniqueMatches);
+                sendNewIssue(baseRequestResponse,
+                        "[JS Miner] " + secretPattern.name,
+                        "The following hardcoded secret tokens were found in a static file.",
+                        uniqueMatchesSB.toString(),
+                        tokenMatches,
+                        secretPattern.severity,
+                        secretPattern.confidence
+                );
+            }
+        }
+    }
+
+    /*
+     *  Heuristic to skip documentation samples / placeholder values that happen to match a
+     *  known token format (e.g. "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx").
+     */
+    private static boolean isLikelyPlaceholder(String matchedSecret) {
+        String lowerCaseSecret = matchedSecret.toLowerCase(Locale.ENGLISH);
+        return lowerCaseSecret.contains("example")
+                || lowerCaseSecret.contains("sample")
+                || lowerCaseSecret.contains("your_")
+                || lowerCaseSecret.contains("your-")
+                || lowerCaseSecret.contains("xxxxx")
+                || lowerCaseSecret.contains("placeholder")
+                || lowerCaseSecret.contains("changeme");
     }
 
     private static void reportFinding(HttpRequestResponse baseRequestResponse, StringBuilder uniqueMatchesSBLow, List<byte[]> uniqueMatchesLow,
